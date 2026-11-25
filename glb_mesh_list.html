@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLB メッシュ一覧整理</title>
+<style>
+:root{color-scheme:dark;--bg:#10141c;--panel:#1a2230;--line:#303b4d;--text:#e9eef7;--muted:#9ba9bd;--accent:#76b7ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1050px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:clamp(22px,4vw,32px);margin:0 0 6px}
+.sub{color:var(--muted);margin:0 0 20px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px}
+.drop{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+input[type=file]{max-width:100%;color:var(--muted)}
+button{border:1px solid var(--line);background:#263449;color:var(--text);border-radius:9px;padding:9px 13px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:default}
+.status{color:var(--muted);margin-top:10px;overflow-wrap:anywhere}
+.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+input[type=search]{background:#0f151f;border:1px solid var(--line);color:var(--text);border-radius:9px;padding:10px;min-width:220px;flex:1}
+.stat{color:var(--muted);font-size:13px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-size:13px;font-weight:600;position:sticky;top:0;background:var(--panel)}
+tbody tr:hover{background:#222d3e}
+.name{font-weight:650;overflow-wrap:anywhere}
+.path{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tag{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted);font-size:12px}
+.empty{padding:28px;text-align:center;color:var(--muted)}
+.tablewrap{overflow:auto;max-height:65vh;border:1px solid var(--line);border-radius:10px}
+.details{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font:13px/1.6 ui-monospace,monospace}
+@media(max-width:650px){main{padding:16px 10px}th,td{padding:8px 7px}.hide-small{display:none}}
+</style>
+</head>
+<body>
+<main>
+  <h1>GLB メッシュ一覧整理</h1>
+  <p class="sub">GLB内のメッシュを読み取り、名前の番号を自然順で並べて表示します。3D描画・書き出しは行いません。</p>
+  <section class="panel">
+    <div class="drop">
+      <input id="file" type="file" accept=".glb,model/gltf-binary">
+      <button id="clear" disabled>クリア</button>
+    </div>
+    <div id="status" class="status">GLBファイルを選択してください。</div>
+  </section>
+  <section class="panel">
+    <div class="controls">
+      <input id="filter" type="search" placeholder="メッシュ名・階層で絞り込み" disabled>
+      <label class="stat"><input id="unnamed" type="checkbox" checked disabled> 名前なしも表示</label>
+    </div>
+    <div id="summary" class="stat" style="margin:12px 0">未読み込み</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>順</th><th>メッシュ名 / ノード</th><th>プリミティブ</th><th>頂点数</th><th class="hide-small">三角形数*</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5" class="empty">GLBを読み込むと一覧が表示されます。</td></tr></tbody>
+      </table>
+    </div>
+    <p class="stat">* 三角形数は三角形・ストリップ・ファンの各モードから計算できる範囲の概算です。頂点数は参照アクセサーの合計です。</p>
+  </section>
+  <section class="panel">
+    <strong>選択したメッシュの詳細</strong>
+    <div id="detail" class="details" style="margin-top:10px">一覧の行をクリックすると詳細を表示します。</div>
+  </section>
+</main>
+<script>
+(() => {
+ const $ = id => document.getElementById(id);
+ const state = {items:[], selected:null, fileName:""};
+ const natural = new Intl.Collator(undefined,{numeric:true,sensitivity:"base"});
+ const safe = (v, fallback="") => (v === undefined || v === null ? fallback : String(v));
+ function parseGLB(buffer){
+   if(buffer.byteLength < 20) throw new Error("ファイルが短すぎます。GLBファイルを選択してください。");
+   const view = new DataView(buffer);
+   if(view.getUint32(0,true)!==0x46546c67) throw new Error("GLBのマジック値が見つかりません。");
+   const version=view.getUint32(4,true), total=view.getUint32(8,true);
+   if(version!==2) throw new Error("このページはGLB 2.0に対応しています。");
+   if(total>buffer.byteLength || total<20) throw new Error("GLBのサイズ情報が不正です。");
+   let offset=12, json=null;
+   while(offset+8<=total){
+     const length=view.getUint32(offset,true), type=view.getUint32(offset+4,true);
+     offset+=8;
+     if(length>total-offset) throw new Error("GLBチャンクのサイズが不正です。");
+     if(type===0x4e4f534a){
+       const bytes=new Uint8Array(buffer,offset,length);
+       json=JSON.parse(new TextDecoder().decode(bytes).replace(/\0+$/,"").trim());
+       break;
+     }
+     offset+=length;
+   }
+   if(!json) throw new Error("JSONチャンクが見つかりません。");
+   return json;
+ }
+ function buildItems(gltf){
+   const meshes=gltf.meshes||[], nodes=gltf.nodes||[], accessors=gltf.accessors||[];
+   const meshNodes=new Map();
+   nodes.forEach((node,ni)=>{
+     if(Number.isInteger(node.mesh)){
+       if(!meshNodes.has(node.mesh)) meshNodes.set(node.mesh,[]);
+       meshNodes.get(node.mesh).push({node,ni});
+     }
+   });
+   const parents=nodes.map(()=>[]);
+   nodes.forEach((n,i)=>(n.children||[]).forEach(c=>{if(Number.isInteger(c)&&parents[c])parents[c].push(i)}));
+   function nodePath(ni){
+     const parts=[],seen=new Set(); let cur=ni;
+     while(Number.isInteger(cur)&&nodes[cur]&&!seen.has(cur)){
+       seen.add(cur); parts.unshift(safe(nodes[cur].name,`Node ${cur}`));
+       cur=parents[cur]?.[0];
+     }
+     return parts.join(" / ");
+   }
+   const items=[];
+   meshes.forEach((mesh,mi)=>{
+     const refs=meshNodes.get(mi)||[null];
+     refs.forEach(ref=>{
+       let verts=0, tri=0, knownTri=true;
+       const prims=mesh.primitives||[];
+       prims.forEach(p=>{
+         const mode=p.mode===undefined?4:p.mode;
+         let count=0;
+         const pos=p.attributes&&p.attributes.POSITION;
+         if(Number.isInteger(pos)&&accessors[pos]) {count=accessors[pos].count||0; verts+=count;}
+         let n=0;
+         if(Number.isInteger(p.indices)&&accessors[p.indices]) n=accessors[p.indices].count||0;
+         else n=count;
+         if(mode===4) tri+=Math.floor(n/3);
+         else if(mode===5||mode===6) tri+=Math.max(0,n-2);
+         else knownTri=false;
+       });
+       const nodeName=ref?safe(ref.node.name,`Node ${ref.ni}`):"（ノード参照なし）";
+       items.push({
+         meshIndex:mi, meshName:safe(mesh.name,`(名前なし Mesh ${mi})`),
+         hasMeshName:!!(mesh.name&&mesh.name.trim()),
+         nodeIndex:ref?ref.ni:null,nodeName,
+         path:ref?nodePath(ref.ni):"",
+         primitives:prims.length,verts,tri:knownTri?tri:null,
+         mesh, node:ref?ref.node:null
+       });
+     });
+   });
+   return items.sort((a,b)=>{
+     const nameCompare=natural.compare(a.meshName,b.meshName);
+     if(nameCompare) return nameCompare;
+     const nodeCompare=natural.compare(a.path||a.nodeName,b.path||b.nodeName);
+     return nodeCompare||a.meshIndex-b.meshIndex;
+   });
+ }
+ function render(){
+   const q=$("filter").value.trim().toLocaleLowerCase();
+   const showUnnamed=$("unnamed").checked;
+   const list=state.items.filter(x=>(showUnnamed||x.hasMeshName)&&(!q||`${x.meshName} ${x.nodeName} ${x.path} ${x.meshIndex}`.toLocaleLowerCase().includes(q)));
+   $("summary").textContent=`${list.length.toLocaleString()} / ${state.items.length.toLocaleString()} 件を表示　｜　メッシュ ${new Set(state.items.map(x=>x.meshIndex)).size.toLocaleString()} 個`;
+   if(!list.length){$("rows").innerHTML='<tr><td colspan="5" class="empty">該当するメッシュがありません。</td></tr>';return;}
+   const frag=document.createDocumentFragment();
+   list.forEach((x,i)=>{
+     const tr=document.createElement("tr"); tr.tabIndex=0; tr.style.cursor="pointer";
+     const cells=[
+       `<span class="num">${i+1}</span>`,
+       `<div class="name"></div><div class="path"></div>`,
+       `<span class="num">${x.primitives}</span>`,
+       `<span class="num">${x.verts.toLocaleString()}</span>`,
+       `<span class="num">${x.tri===null?"—":x.tri.toLocaleString()}</span>`
+     ];
+     cells.forEach((html,ci)=>{const td=document.createElement("td");td.innerHTML=html;tr.appendChild(td);});
+     tr.children[1].querySelector(".name").textContent=x.meshName;
+     tr.children[1].querySelector(".path").textContent=x.path||x.nodeName;
+     tr.addEventListener("click",()=>showDetail(x));
+     tr.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();showDetail(x);}});
+     frag.appendChild(tr);
+   });
+   $("rows").replaceChildren(frag);
+ }
+ function showDetail(x){
+   state.selected=x;
+   const d={
+     meshName:x.meshName, meshIndex:x.meshIndex,
+     nodeName:x.nodeName, nodeIndex:x.nodeIndex,
+     nodePath:x.path||"(階層パスなし)",
+     primitiveCount:x.primitives, vertexCount:x.verts,
+     triangleCount:x.tri,
+     extras:x.mesh.extras||null
+   };
+   $("detail").textContent=JSON.stringify(d,null,2);
+ }
+ $("file").addEventListener("change",async e=>{
+   const file=e.target.files&&e.target.files[0]; if(!file)return;
+   $("status").textContent=`読み込み中: ${file.name}`;
+   $("rows").innerHTML='<tr><td colspan="5" class="empty">解析中…</td></tr>';
+   try{
+     const buffer=await file.arrayBuffer();
+     const gltf=parseGLB(buffer);
+     state.items=buildItems(gltf);state.fileName=file.name;
+     $("filter").disabled=false;$("unnamed").disabled=false;$("clear").disabled=false;
+     $("filter").value="";
+     $("status").textContent=`読み込み完了: ${file.name}（${(file.size/1024/1024).toFixed(2)} MB）`;
+     $("detail").textContent="一覧の行をクリックすると詳細を表示します。";
+     render();
+   }catch(err){
+     state.items=[];render();
+     $("status").textContent="読み込みエラー: "+(err&&err.message?err.message:String(err));
+   }
+ });
+ $("filter").addEventListener("input",render);
+ $("unnamed").addEventListener("change",render);
+ $("clear").addEventListener("click",()=>{
+   $("file").value="";$("filter").value="";$("filter").disabled=true;$("unnamed").disabled=true;$("clear").disabled=true;
+   state.items=[];state.selected=null;
+   $("status").textContent="GLBファイルを選択してください。";
+   $("summary").textContent="未読み込み";
+   $("rows").innerHTML='<tr><td colspan="5" class="empty">GLBを読み込むと一覧が表示されます。</td></tr>';
+   $("detail").textContent="一覧の行をクリックすると詳細を表示します。";
+ });
+})();
+</script>
+</body>
+</html>
